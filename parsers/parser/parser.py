@@ -16,7 +16,7 @@ class PageTextParser:
         self.product = product
         self.criterion = criterion  # пока просто метаданные, LLM их может использовать
         self.urls = urls
-    
+
     def fetch_html(self, url: str) -> str:
         """Скачиваем HTML"""
         resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
