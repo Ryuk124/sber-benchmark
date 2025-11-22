@@ -2,9 +2,10 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from llm.llm_qwen import analyze_with_llm
-from dotenv import load_dotenv
 from typing import List, Dict, Optional
+from dotenv import load_dotenv
+
+from llm.llm_qwen import run_llm
 
 load_dotenv()
 
@@ -35,6 +36,14 @@ class LLMService:
                 llm_prompt_version TEXT
             );
             """)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS llm_recommendations (
+                id SERIAL PRIMARY KEY,
+                analysis_id INT REFERENCES llm_analysis(id),
+                recommendation_text TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+            """)
             self.conn.commit()
 
     def analyze_and_store(
@@ -45,17 +54,17 @@ class LLMService:
         time_override: Optional[datetime] = None
     ) -> List[Dict]:
         """
-        Берём список страниц (от парсера), прогоняем через LLM, сохраняем результаты в БД.
-        Если time_override задан, он сохранится в поле 'time', иначе = parsed_at.
+        Берём список страниц (от парсера), прогоняем через LLM (facts), сохраняем результаты в БД.
         """
         results = []
         for page in pages:
             if page.get("cleaned_text"):
-                analysis = analyze_with_llm(
-                    text=page["cleaned_text"],
+                analysis = run_llm(
                     competitor=page["competitor"],
                     product=page["product"],
-                    criterion=page["criterion"]
+                    criterion=page["criterion"],
+                    text=page["cleaned_text"],
+                    mode="facts"
                 )
                 parsed_at = datetime.fromisoformat(
                     page.get("parsed_at", datetime.utcnow().isoformat())
@@ -94,14 +103,13 @@ class LLMService:
             ))
         self.conn.commit()
 
-    def query(
-        self,
+    def generate_recommendations(self,
         competitor: Optional[str] = None,
         product: Optional[str] = None,
         criterion: Optional[str] = None
     ) -> List[Dict]:
         """
-        Получить записи из БД с фильтрами
+        Берёт факты из llm_analysis, прогоняет через LLM (recommendations), сохраняет в БД.
         """
         q = "SELECT * FROM llm_analysis WHERE 1=1"
         params = []
@@ -117,4 +125,61 @@ class LLMService:
 
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(q, params)
+            facts = cur.fetchall()
+
+        recommendations = []
+        for fact in facts:
+            rec_text = run_llm(
+                competitor=fact["competitor"],
+                product=fact["product"],
+                criterion=fact["criterion"],
+                mode="recommendations",
+                context=fact
+            )
+            self._insert_recommendation(fact["id"], rec_text)
+            recommendations.append({
+                "analysis_id": fact["id"],
+                "recommendation_text": rec_text
+            })
+        return recommendations
+
+    def _insert_recommendation(self, analysis_id: int, rec_text: str):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+            INSERT INTO llm_recommendations (analysis_id, recommendation_text)
+            VALUES (%s, %s)
+            """, (analysis_id, rec_text))
+        self.conn.commit()
+
+    # ---- Запросы ----
+    def query(self,
+        competitor: Optional[str] = None,
+        product: Optional[str] = None,
+        criterion: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Получить записи из llm_analysis с фильтрами
+        """
+        q = "SELECT * FROM llm_analysis WHERE 1=1"
+        params = []
+        if competitor:
+            q += " AND competitor=%s"
+            params.append(competitor)
+        if product:
+            q += " AND product=%s"
+            params.append(product)
+        if criterion:
+            q += " AND criterion=%s"
+            params.append(criterion)
+
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(q, params)
+            return cur.fetchall()
+
+    def query_recommendations(self) -> List[Dict]:
+        """
+        Получить все рекомендации
+        """
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM llm_recommendations")
             return cur.fetchall()
