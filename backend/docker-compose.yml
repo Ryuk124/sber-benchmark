@@ -1,0 +1,155 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: sberbench_postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-sberbench}
+      POSTGRES_USER: ${DB_USER:-sberbench}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-sberbench}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sberbench}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Celery broker and caching
+  redis:
+    image: redis:7-alpine
+    container_name: sberbench_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  # Django Backend
+  backend:
+    build: .
+    container_name: sberbench_backend
+    command: >
+      sh -c "
+      python manage.py migrate &&
+      python manage.py init_data &&
+      python manage.py collectstatic --noinput &&
+      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
+      "
+    environment:
+      DEBUG: ${DEBUG:-False}
+      SECRET_KEY: ${SECRET_KEY}
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${DB_NAME:-sberbench}
+      DB_USER: ${DB_USER:-sberbench}
+      DB_PASSWORD: ${DB_PASSWORD:-sberbench}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/status/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker for background tasks (parsing, etc.)
+  celery_worker:
+    build: .
+    container_name: sberbench_celery_worker
+    command: celery -A config worker --loglevel=info --concurrency=4
+    environment:
+      DEBUG: ${DEBUG:-False}
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${DB_NAME:-sberbench}
+      DB_USER: ${DB_USER:-sberbench}
+      DB_PASSWORD: ${DB_PASSWORD:-sberbench}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - .:/app
+
+  # Celery Beat for scheduled tasks
+  celery_beat:
+    build: .
+    container_name: sberbench_celery_beat
+    command: celery -A config beat --loglevel=info
+    environment:
+      DEBUG: ${DEBUG:-False}
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${DB_NAME:-sberbench}
+      DB_USER: ${DB_USER:-sberbench}
+      DB_PASSWORD: ${DB_PASSWORD:-sberbench}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - .:/app
+
+  # InfluxDB for time-series metrics
+  influxdb:
+    image: influxdb:2.6-alpine
+    container_name: sberbench_influxdb
+    environment:
+      INFLUXDB_DB: sberbench
+      INFLUXDB_ADMIN_USER: admin
+      INFLUXDB_ADMIN_PASSWORD: admin
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  # Grafana for dashboards and analytics
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sberbench_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-worldmap-panel,grafana-piechart-panel
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SECURITY_ALLOW_EMBED_INITIATION: "true"
+      GF_SECURITY_COOKIE_SAMESITE: Lax
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - influxdb
+    volumes:
+      - ./grafana.ini:/etc/grafana/grafana.ini
+      - grafana_storage:/var/lib/grafana
+
+volumes:
+  postgres_data:
+  redis_data:
+  influxdb_data:
+  grafana_storage:
+
+networks:
+  default:
+    name: sberbench_network

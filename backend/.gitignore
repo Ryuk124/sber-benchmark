@@ -1,0 +1,17 @@
+# Backend
+logs/
+staticfiles/
+*.pyc
+__pycache__/
+.env
+.env.local
+db.sqlite3
+.DS_Store
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage/
+htmlcov/
